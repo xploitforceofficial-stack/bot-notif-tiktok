@@ -7,33 +7,57 @@ const {
 } = require('@whiskeysockets/baileys');
 const { Boom } = require('@hapi/boom');
 const pino = require('pino');
-const Parser = require('rss-parser');
 const express = require('express');
 const dotenv = require('dotenv');
 const fs = require('fs');
 const axios = require('axios');
+const cheerio = require('cheerio');
 
 dotenv.config();
-const parser = new Parser({
-    headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'application/rss+xml, application/xml;q=0.9, */*;q=0.8'
-    }
-});
 const app = express();
 
+// Konfigurasi
 const TARGET_USERNAME = process.env.TARGET_TIKTOK_USERNAME || 'viunze';
 const GROUP_ID = process.env.WA_GROUP_ID || '120363404281995418@g.us';
 const NEWSLETTER_ID = process.env.WA_NEWSLETTER_ID || '120363423887149826@newsletter';
 const PHONE_NUMBER = "6285940682068";
 const CHECK_INTERVAL = 60000; 
 
-app.get('/', (req, res) => res.send('Bot is Running 24/7'));
+app.get('/', (req, res) => res.send('Bot Aktif 24 Jam'));
 app.listen(process.env.PORT || 8080, () => console.log('Web Server Ready'));
 
-let lastVideoLink = "";
+let lastVideoId = "";
 if (fs.existsSync('last_video.txt')) {
-    lastVideoLink = fs.readFileSync('last_video.txt', 'utf8');
+    lastVideoId = fs.readFileSync('last_video.txt', 'utf8');
+}
+
+async function getLatestTikTokVideo(username) {
+    try {
+        // Menggunakan Urlebird sebagai sumber scraping utama (tanpa RSS)
+        const url = `https://urlebird.com/user/${username}/`;
+        const { data } = await axios.get(url, {
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            }
+        });
+
+        const $ = cheerio.load(data);
+        const firstVideoBox = $('.thumb-video').first();
+        const videoLink = firstVideoBox.find('a').attr('href');
+        const videoTitle = firstVideoBox.find('img').attr('alt') || "Video Baru";
+
+        if (videoLink) {
+            return {
+                id: videoLink, // Menggunakan link sebagai ID unik
+                link: videoLink,
+                title: videoTitle
+            };
+        }
+        return null;
+    } catch (error) {
+        console.error('Scraping Error:', error.message);
+        return null;
+    }
 }
 
 async function connectToWhatsApp() {
@@ -79,46 +103,28 @@ async function connectToWhatsApp() {
 }
 
 async function startMonitoring(sock) {
-    console.log(`Monitoring TikTok: ${TARGET_USERNAME}`);
+    console.log(`Monitoring TikTok Scraper: ${TARGET_USERNAME}`);
     
-    // Gunakan beberapa provider RSS cadangan jika satu gagal
-    const rssProviders = [
-        `https://urlebird.com/user/${TARGET_USERNAME}/rss/`,
-        `https://clout.wiki/user/${TARGET_USERNAME}/rss/`
-    ];
-
     setInterval(async () => {
-        let success = false;
+        const video = await getLatestTikTokVideo(TARGET_USERNAME);
         
-        for (const url of rssProviders) {
-            if (success) break;
+        if (video && video.id !== lastVideoId) {
+            console.log('Video baru ditemukan:', video.title);
+            
+            const message = `vidio baru nih rek\nJudul video: ${video.title}\ngas mampir:v\n${video.link}`;
             
             try {
-                const feed = await parser.parseURL(url);
-                if (feed.items && feed.items.length > 0) {
-                    const latestVideo = feed.items[0];
-                    const videoLink = latestVideo.link;
-                    const videoTitle = latestVideo.title || "Video Baru";
+                // Kirim ke Grup
+                await sock.sendMessage(GROUP_ID, { text: message });
+                // Kirim ke Saluran
+                await sock.sendMessage(NEWSLETTER_ID, { text: message });
 
-                    if (videoLink !== lastVideoLink) {
-                        const message = `vidio baru nih rek\nJudul video: ${videoTitle}\ngas mampir:v\n${videoLink}`;
-                        
-                        await sock.sendMessage(GROUP_ID, { text: message });
-                        await sock.sendMessage(NEWSLETTER_ID, { text: message });
-
-                        lastVideoLink = videoLink;
-                        fs.writeFileSync('last_video.txt', videoLink);
-                        console.log('Notifikasi video baru terkirim!');
-                    }
-                    success = true;
-                }
-            } catch (error) {
-                // Lanjut ke provider berikutnya jika gagal
+                lastVideoId = video.id;
+                fs.writeFileSync('last_video.txt', video.id);
+                console.log('Pesan otomatis terkirim!');
+            } catch (e) {
+                console.error('Gagal mengirim pesan WA:', e.message);
             }
-        }
-
-        if (!success) {
-            console.log('Semua provider RSS gagal. Mencoba lagi menit depan...');
         }
     }, CHECK_INTERVAL);
 }
